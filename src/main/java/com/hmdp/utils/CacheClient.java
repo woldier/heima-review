@@ -135,6 +135,7 @@ public class CacheClient {
         boolean lock = getLock(LOCK_REGIN,lockTime);
         /*3.1获取不成功,使用原始数据*/
         if (lock) {
+            // TODO 这里还应该再检测一次是否过期
             CACHE_REBUILD_SERVICE.submit(()->{
                 try {
                     /*查询数据库*/
