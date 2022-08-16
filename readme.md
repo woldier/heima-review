@@ -1013,3 +1013,80 @@ public class MvcConfig implements WebMvcConfigurer {
 
 
 ![image-20220816122059834](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220816122059834.png)
+
+
+
+首先我们来完成查询数据库并且设置逻辑过期时间保存的代码
+
+```java
+ public void saveShop2Redis(Long id,Long ttl){
+        /*查询数据库*/
+        Shop shop = this.getById(id);
+        /*数据封装*/
+        RedisData cache = new RedisData();
+        /*设置逻辑过期时间为当前时间+ttl*/
+        cache.setExpireTime(LocalDateTime.now().plusSeconds(ttl));
+        /*设置shop*/
+        cache.setData(shop);
+        /*存入热点数据,并且不设置有效期*/
+        redisTemplate.opsForValue().set( CACHE_SHOP_KEY + id,JSONUtil.toJsonStr(cache));
+    }
+```
+
+```java
+ private Shop queryByIdWithLogicExpire(Long id) {
+        final  String  REGIN = CACHE_SHOP_KEY + id;
+        /*1.从redis查询*/
+        String cache = redisTemplate.opsForValue().get(REGIN);
+        /*2.检查过期时间,若没有过期直接返回*/
+        RedisData redisData = JSONUtil.toBean(cache, RedisData.class);
+        /*获取过期时间*/
+        LocalDateTime expireTime = redisData.getExpireTime();
+        /*获取商户数据*/
+        Shop shop = JSONUtil.toBean((JSONObject) redisData.getData(), Shop.class);
+        LocalDateTime now = LocalDateTime.now();
+        if(now.isBefore(expireTime))/*未过期直接返回*/
+            return shop;
+
+        /*过期进行数据的重载*/
+        /*3.获取锁*/
+        boolean lock = getLock(id);
+        /*3.1获取不成功,使用原始数据*/
+        if (lock) {
+
+//                /*3.2获取成功,开启线程,在开启线程之前再次查询redis 检查是否过期*/
+//                /*3.2.1.从redis查询*/
+//                cache = redisTemplate.opsForValue().get(REGIN);
+//                /*3.2.2.检查过期时间,若没有过期直接返回*/
+//                /*在重建数据之前再此检测是否过期*/
+//                redisData = JSONUtil.toBean(cache, RedisData.class);
+//                /*获取过期时间*/
+//                expireTime = redisData.getExpireTime();
+//                /*获取商户数据*/
+//                shop = JSONUtil.toBean((JSONObject) redisData.getData(), Shop.class);
+//                if(LocalDateTime.now().isBefore(expireTime)) /*未过期直接返回*/
+//                    return shop;
+                /*4过期进行数据重建*/
+                CACHE_REBUILD_SERVICE.submit(()->{
+                    try {
+                        this.saveShop2Redis(id,LOCK_SHOP_TTL);
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();
+                    }finally {
+                        /*释放锁*/
+                        unLock(id);
+                    }
+                });
+            }
+
+
+
+        return shop;
+    }
+```
+
+![image-20220816161751849](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220816161751849.png)
+
+![image-20220816161811108](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220816161811108.png)
+
+我们通过数据库工具修改shop信息,经过并发测试可以发现经过一段时间后,数据发生更正.
