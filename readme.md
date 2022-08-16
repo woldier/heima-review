@@ -1,6 +1,6 @@
 #  黑马点评项目-redis实战
 
-	## 1. 准备工作
+## 1. 准备工作
 
 - 导入初始项目到本地
 
@@ -675,3 +675,99 @@ public class MvcConfig implements WebMvcConfigurer {
 
 ```
 
+## 4. 商户信息缓存
+
+![image-20220815145129959](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220815145129959.png)
+
+```java
+/**
+     * 查询商户信息(redis)
+     * @param id 商户id
+     * @return 返回商户信息
+     */
+    @Override
+    public Shop queryById(Long id) {
+        final  String  REGIN = CACHE_SHOP_KEY + id;
+        /*1.从redis查询*/
+        String cache = redisTemplate.opsForValue().get(REGIN);
+        /*2.redis存在直接返回,并设置刷新时间*/
+
+        if (cache!=null) {
+            /*刷新有效期*/
+            redisTemplate.expire(REGIN,CACHE_SHOP_TTL, TimeUnit.MINUTES);
+            Shop shop = JSONUtil.toBean(cache, Shop.class);
+            return shop;
+        }
+
+        /*3.redis不在查询数据库*/
+        Shop shop = this.getById(id);
+        /*4.数据库不存在直接返回*/
+        if (shop==null)
+            return null;
+        /*5.数据库存在设置到redis并返回*/
+        String shopAsString = JSONUtil.toJsonStr(shop);
+        redisTemplate.opsForValue().set(REGIN,shopAsString);
+            /*设置过期时间*/
+        redisTemplate.expire(REGIN,CACHE_SHOP_TTL, TimeUnit.MINUTES);
+        return shop;
+    }
+```
+
+![image-20220815153409058](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220815153409058.png)
+
+列表缓存
+
+```java
+   @GetMapping("list")
+    public Result queryTypeList() {
+        /*查询redis*/
+        List<String> cache = redisTemplate.opsForList().range(CACHE_SHOP_LIST_KEY,0,9);
+        if(cache.size()!=0){
+            List<ShopType> shopTypes = cache.stream().map( e -> JSONUtil.toBean(e,ShopType.class)).collect(Collectors.toList());
+            /*设置有效时间*/
+            redisTemplate.expire(CACHE_SHOP_LIST_KEY,CACHE_SHOP_TTL, TimeUnit.MINUTES);
+            return  Result.ok(shopTypes);
+        }
+
+        List<ShopType> typeList = typeService
+                .query().orderByAsc("sort").list();
+        typeList.stream().forEach(e -> redisTemplate.opsForList().rightPush(CACHE_SHOP_LIST_KEY,JSONUtil.toJsonStr(e)));
+        /*设置有效时间*/
+        redisTemplate.expire(CACHE_SHOP_LIST_KEY,CACHE_SHOP_TTL, TimeUnit.MINUTES);
+        return Result.ok(typeList);
+    }
+```
+
+##  5. 缓存更新策略
+
+![image-20220815161536017](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220815161536017.png)
+
+![image-20220815162314478](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220815162314478.png)
+
+![image-20220815164728551](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220815164728551.png)
+
+注: 这里的分布式系统TTC可参考Seata
+
+
+
+
+
+更新方案
+
+![image-20220815170207787](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220815170207787.png)
+
+左图如果执行顺序如下,则不会出现错误情况,若线程执行如上图则会出现数据不一致,会出现线程安全问题.因为在删除缓存并且更新数据的过程中(这个更新数据库时间较长) ,在这是cache 未命中并且查询到旧数据的机会很大,因为查询时间相较于插入时间会短的多.
+
+![image-20220815170420056](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220815170420056.png)
+
+右图如果执行顺序如上,则不会出现数据不一致.
+
+
+
+但是他也存在一些问题:
+
+![image-20220815170841680](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220815170841680.png)
+
+当查询线程先查询,未命中,则会查询数据库,若查询完后,线程2立即运行,数据库信息发生改变,但是这里写入的缓存任然是旧数据.
+
+但是这种方式下在查询未命中查询数据库时(很小的一个时间范围)恰好有另一个线程来更新数据库的机会就小很多.
