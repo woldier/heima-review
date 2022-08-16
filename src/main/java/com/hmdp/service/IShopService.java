@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.hmdp.dto.Result;
 import com.hmdp.entity.Shop;
 import com.baomidou.mybatisplus.extension.service.IService;
+import com.hmdp.exception.BizException;
 
 /**
  * <p>
@@ -15,7 +16,7 @@ import com.baomidou.mybatisplus.extension.service.IService;
  */
 public interface IShopService extends IService<Shop> {
 
-    Shop queryById(Long id) ;
+    Shop queryById(Long id) throws BizException;
 
     void update(Shop shop);
 }

@@ -771,3 +771,96 @@ public class MvcConfig implements WebMvcConfigurer {
 当查询线程先查询,未命中,则会查询数据库,若查询完后,线程2立即运行,数据库信息发生改变,但是这里写入的缓存任然是旧数据.
 
 但是这种方式下在查询未命中查询数据库时(很小的一个时间范围)恰好有另一个线程来更新数据库的机会就小很多.
+
+##  6. 缓存穿透
+
+###  6.1 缓存穿透的概念 
+
+缓存穿透是指客户端请求的数据在缓存中和数据库都不存在,这样缓存永远不会生效,这些请求都会达到数据库.
+
+解决策略:
+
+1. 缓存空对象
+
+   优点:实现简单,维护方便
+
+   缺点:额外的内存消耗,可能造成短期不一致.
+
+   ![image-20220816100726092](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220816100726092.png)
+
+2. 布隆过滤
+
+   优点:内存占用少,没有多余的key
+
+   缺点:实现复杂,存在误判可能.
+
+ ### 6.2 解决策略的实现
+
+![image-20220816101330206](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220816101330206.png)
+
+```java
+    @Override
+    public Shop queryById(Long id) throws BizException {
+        final  String  REGIN = CACHE_SHOP_KEY + id;
+        /*1.从redis查询*/
+        String cache = redisTemplate.opsForValue().get(REGIN);
+        /*2.redis存在直接返回,并设置刷新时间*/
+        if (cache!=null) {
+
+            if ("".equals(cache))
+                /*表明为空缓存,防止击穿抛出异常*/
+                throwShopInfoNE();
+            /*刷新有效期*/
+            redisTemplate.expire(REGIN,CACHE_SHOP_TTL, TimeUnit.MINUTES);
+            Shop shop = JSONUtil.toBean(cache, Shop.class);
+            return shop;
+        }
+
+        /*3.redis不在查询数据库*/
+        Shop shop = this.getById(id);
+        /*4.数据库不存在*/
+        if (shop==null) {
+            /*设置空缓存防止内存穿透,并且抛出异常*/
+            redisTemplate.opsForValue().set(REGIN,"");
+            redisTemplate.expire(REGIN,CACHE_NULL_TTL, TimeUnit.MINUTES);
+            throwShopInfoNE();
+
+        }
+
+        /*5.数据库存在设置到redis并返回*/
+        String shopAsString = JSONUtil.toJsonStr(shop);
+        redisTemplate.opsForValue().set(REGIN,shopAsString);
+            /*设置过期时间*/
+        redisTemplate.expire(REGIN,CACHE_SHOP_TTL, TimeUnit.MINUTES);
+        return shop;
+    }
+
+
+  private void throwShopInfoNE() throws BizException {
+        throw new BizException("商户不存在");
+    }
+
+```
+
+我们在第五步中判断了查询到的数据是否为空,为空设置了空缓存
+
+在第二步中查询了缓存,并且判断了该缓存是否为空缓存.
+
+
+
+
+
+布隆过滤的实现,在后面bitmap时进行实现.
+
+
+
+##  7. 缓存雪崩
+
+缓存雪崩是指在同一时间大量缓存的key同时失效或者redis服务宕机,导致大量请求到达数据库,带来巨大压力.
+
+解决方案:
+
+- 给不同key的TTL再随机添加一个随机值
+- 利用redis集群提高服务的可用性(redis宕机)
+- 给缓存业务添加降级限流策略(服务熔断)
+
