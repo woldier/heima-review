@@ -15,9 +15,5 @@ class HmDianPingApplicationTests {
     @Autowired
     ShopServiceImpl shopService;
 
-    @Test
-    public void test1() throws InterruptedException {
-        shopService.saveShop2Redis(1L,200L);
-    }
 
 }

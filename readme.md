@@ -1090,3 +1090,9 @@ public class MvcConfig implements WebMvcConfigurer {
 ![image-20220816161811108](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220816161811108.png)
 
 我们通过数据库工具修改shop信息,经过并发测试可以发现经过一段时间后,数据发生更正.
+
+##  9. Redis工具类的封装
+
+![image-20220816164536397](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220816164536397.png)
+
+ 
