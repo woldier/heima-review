@@ -1,4 +1,4 @@
-#  黑马点评项目-redis实战
+黑马点评项目-redis实战
 
 ## 1. 准备工作
 
@@ -864,3 +864,152 @@ public class MvcConfig implements WebMvcConfigurer {
 - 利用redis集群提高服务的可用性(redis宕机)
 - 给缓存业务添加降级限流策略(服务熔断)
 
+##  8. 缓存击穿
+
+###  8.1 缓存击穿的概念,及解决策略
+
+缓存击穿问题也叫热点key问题,就是一个被`高并发访问`并且`缓存重建业务复杂`的key突然失效了,无效的请求访问会在瞬间给数据库带来巨大的冲击.
+
+![image-20220816104337698](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220816104337698.png)
+
+解决方案:
+
+- 互斥锁
+
+  此方法下,若重构线程耗时较长,可能会导致其他等待线程数量激增,性能不好
+
+  ![image-20220816104550980](C:\Users\wang1\AppData\Roaming\Typora\typora-user-images\image-20220816104550980.png)
+
+- 逻辑过期
+
+在数据中添加一个过期字段手动取维护一个过期字段,在redis中不设置TTL
+
+![image-20220816105116435](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220816105116435.png)
+
+两种方案的对比
+
+![image-20220816105137922](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220816105137922.png)
+
+###  8.2 解决缓存击穿的实现
+
+###  8.2.1 互斥锁解决方案
+
+首先我们向基于redis实现互斥锁,这里我们获取锁用到了String中的`setnx key value` 命令,释放锁我们用到的是`del key`
+
+,多个线程我们可以更具`setnx key value`返回的值来判断是否获取锁成功.
+
+![image-20220816110238516](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220816110238516.png)
+
+> -- 当然,我们在设置锁的时候也会给他一个有效期,解决获取锁的线程如果在获取锁之后出现宕机的情况. --
+
+注意下面的流程图中,获取锁之后,还应该再次查看redis中是否又数据,若有则直接放回(这是因为,有可能有两个线程同时贱则到缓存为空,都要获取锁,但是可能出现的情况是线程1获取锁成功进行缓存重建释放了锁之后,线程2才获取锁,这时候明显获取锁成功了,这时候会导致缓存重建两次)
+
+![image-20220816113801971](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220816113801971.png)
+
+```java
+   /**
+     * 缓存击穿+缓存穿透, mutex实现
+     * @throws BizException
+     */
+    private Shop queryByIdWithCacheMutex(Long id) throws BizException {
+        final  String  REGIN = CACHE_SHOP_KEY + id;
+        /*1.从redis查询*/
+        String cache = redisTemplate.opsForValue().get(REGIN);
+        /*2.redis存在直接返回,并设置刷新时间*/
+        if (cache!=null) {
+
+            if ("".equals(cache))
+                /*表明为空缓存,防止击穿抛出异常*/
+                throwShopInfoNE();
+            /*刷新有效期*/
+            redisTemplate.expire(REGIN,CACHE_SHOP_TTL, TimeUnit.MINUTES);
+            Shop shop = JSONUtil.toBean(cache, Shop.class);
+            return shop;
+        }
+        Shop shop = null;
+
+        try {
+            /*3.redis不在查询数据库*/
+            /*3.1获取锁*/
+            if(! getLock(id)){
+                /*3.3失败则睡眠,再重新调用本方法*/
+                 Thread.sleep(50);
+                 return queryByIdWithCacheMutex(id);
+            }
+            /*3.2获取成功查询数据库*/
+            /*3.2.1在查询数据库之前,我们应该再次查询redis 看看数据是否存在 存在则无需重建缓存*/
+            /*3.2.1.1从redis查询*/
+            String cache2 = redisTemplate.opsForValue().get(REGIN);
+            /*3.2.1.2.redis存在直接返回,并设置刷新时间*/
+            if (cache2!=null) {
+
+                if ("".equals(cache2))
+                    /*表明为空缓存,防止击穿抛出异常*/
+                    throwShopInfoNE();
+                /*刷新有效期*/
+                redisTemplate.expire(REGIN,CACHE_SHOP_TTL, TimeUnit.MINUTES);
+                shop = JSONUtil.toBean(cache2, Shop.class);
+                return shop;
+            }
+
+
+            shop = this.getById(id);
+            /*4.数据库不存在*/
+            if (shop==null) {
+                /*设置空缓存防止内存穿透,并且抛出异常*/
+                redisTemplate.opsForValue().set(REGIN,"");
+                redisTemplate.expire(REGIN,CACHE_NULL_TTL, TimeUnit.MINUTES);
+                throwShopInfoNE();
+
+            }
+
+            /*5.数据库存在设置到redis并返回*/
+            String shopAsString = JSONUtil.toJsonStr(shop);
+            redisTemplate.opsForValue().set(REGIN,shopAsString);
+            /*5.1设置过期时间*/
+            redisTemplate.expire(REGIN,CACHE_SHOP_TTL, TimeUnit.MINUTES);
+        } catch (InterruptedException e) {
+            throw  new RuntimeException();
+        } finally {
+            /*6.释放锁*/
+            unLock(id);
+        }
+
+
+
+
+        return shop;
+
+    }
+
+    /**
+     * 获取锁
+     * @param id
+     * @return
+     */
+    public boolean getLock(Long id){
+        /*得到锁并设置有效时间*/
+        return redisTemplate.opsForValue().setIfAbsent(LOCK_SHOP_KEY + id, "1", LOCK_SHOP_TTL, TimeUnit.MINUTES).booleanValue();
+
+    }
+
+    /**
+     * 释放锁
+     * @param id
+     */
+    public void unLock(Long id){
+        redisTemplate.delete(LOCK_SHOP_KEY + id);
+    }
+
+    private void throwShopInfoNE() throws BizException {
+        throw new BizException("商户不存在");
+    }
+```
+
+此处用jmeter进行测试,可以在服务器控制台查看到只请求了一次服务器
+
+###  8.2.2 基于逻辑过期解决缓存击穿问题
+
+
+
+![image-20220816122059834](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220816122059834.png)
