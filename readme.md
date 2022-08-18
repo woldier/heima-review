@@ -1444,3 +1444,130 @@ public class RedisIdWorker {
 - 雪花算法也是知名的全局算吗,不过其需要保证机器码独有
 - 数据库自增,是指单独拿数据库钟一张表来做自增得到id的0-31位,看一看作redis实现的数据库版.
 
+###  10.2 秒杀下单功能
+
+```java
+/**
+     * 秒杀券下单
+     * @param voucherId
+     * @return
+     */
+    @Override
+    @Transactional
+    public Long seckillVoucher(Long voucherId) throws BizException {
+        /*1.查询过期时间和库存*/
+        SeckillVoucher seckillVoucher = voucherService.getById(voucherId);
+        LocalDateTime now = LocalDateTime.now();
+        if(seckillVoucher.getBeginTime().isAfter(now)) throw new BizException("秒杀尚未开始");
+        if(seckillVoucher.getEndTime().isBefore(now)) throw new BizException("秒杀已经结束");
+        if(seckillVoucher.getStock()<1) throw new BizException("库存不足");
+        /*库存扣减*/
+        seckillVoucher.setStock(seckillVoucher.getStock()-1);
+        boolean b = voucherService.updateById(seckillVoucher);
+        if(!b) throw new BizException("库存不足");
+        /*2.创建订单*/
+        VoucherOrder voucherOrder = new VoucherOrder();
+        /*得到用户id*/
+        voucherOrder.setUserId(UserHolder.getUser().getId());
+        /*生成id*/
+        Long orderId = redisIdWorker.nextId("order");
+        voucherOrder.setId(orderId);
+        /*得到代金券id*/
+        voucherOrder.setVoucherId(seckillVoucher.getVoucherId());
+        this.save(voucherOrder);
+        return orderId;
+    }
+```
+
+###  10.3 超卖问题
+
+商品减少与订单增加的数目不一致.
+
+乐观锁-版本号法
+
+![image-20220818172842151](C:\Users\wang1\IdeaProjects\hm-dianping\readme.assets\image-20220818172842151.png)
+
+![image-20220818173327155](C:\Users\wang1\IdeaProjects\hm-dianping\readme.assets\image-20220818173327155.png)
+
+- mybatis实现乐观锁
+
+数据库加入value字段
+
+实体version字段加入乐观锁注解`@Vesion`
+
+```java
+@Data
+@EqualsAndHashCode(callSuper = false)
+@Accessors(chain = true)
+@TableName("tb_seckill_voucher")
+public class SeckillVoucher implements Serializable {
+
+    private static final long serialVersionUID = 1L;
+
+    /**
+     * 关联的优惠券的id
+     */
+    @TableId(value = "voucher_id", type = IdType.INPUT)
+    private Long voucherId;
+
+    /**
+     * 库存
+     */
+    private Integer stock;
+
+    /**
+     * 创建时间
+     */
+    private LocalDateTime createTime;
+
+    /**
+     * 生效时间
+     */
+    private LocalDateTime beginTime;
+
+    /**
+     * 失效时间
+     */
+    private LocalDateTime endTime;
+
+    /**
+     * 更新时间
+     */
+    private LocalDateTime updateTime;
+
+    /**
+     * 锁
+     */
+    @Version
+    private Integer version;
+
+}
+
+```
+
+配置mytatis加入乐观锁组件
+
+```java
+@Configuration
+public class MybatisConfig {
+    @Bean
+    public MybatisPlusInterceptor mybatisPlusInterceptor() {
+        MybatisPlusInterceptor interceptor = new MybatisPlusInterceptor();
+        interceptor.addInnerInterceptor(new PaginationInnerInterceptor(DbType.MYSQL));
+        /*乐观锁*/
+        interceptor.addInnerInterceptor(new OptimisticLockerInnerInterceptor());
+        return interceptor;
+    }
+}
+
+```
+
+下单代码不做更改
+
+- 自编码实现乐观锁
+
+上面mybatis实现乐观锁,虽然解决了超卖,但是现目前任然有问题,如果100个线程获取version都相同,那么只有一个线程成功,用户体验不好.失败率大大升高.
+
+因此,我们为了增加成功率我们改用stock(库存作为判定标准)自行实现
+
+![image-20220818181148498](C:\Users\wang1\IdeaProjects\hm-dianping\readme.assets\image-20220818181148498.png)

@@ -77,5 +77,4 @@ public class VoucherOrder implements Serializable {
      */
     private LocalDateTime updateTime;
 
-
 }
