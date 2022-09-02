@@ -1,3 +1,5 @@
+
+
 黑马点评项目-redis实战
 
 ## 1. 准备工作
@@ -2008,4 +2010,50 @@ public class SimpleRedisLock implements ILock {
 }
 
 ```
+
+##  12. redisson
+
+前述方式的分布式存在的问题.
+
+![image-20220902151943350](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220902151943350.png)
+
+###  12.1 redisson简介
+
+![image-20220902152234004](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220902152234004.png)
+
+https://github.com/redisson/redisson
+
+###  12.2 redisson入门
+
+![image-20220902155624543](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220902155624543.png)
+
+```xml
+
+        <dependency>
+            <groupId>org.redisson</groupId>
+            <artifactId>redisson</artifactId>
+            <version>3.13.6</version>
+        </dependency>
+```
+
+```java
+/**
+ * redisson配置
+ */
+@Configuration
+public class RedissonConfig {
+    @Bean
+    public RedissonClient redissonClient(){
+        Config config = new Config();
+        //config.useClusterServers();
+        config.useSingleServer().setAddress("redis:192.168.0.103");
+        return Redisson.create(config);
+    }
+}
+
+```
+
+
+
+![image-20220902155837546](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220902155837546.png)
 

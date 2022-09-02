@@ -11,6 +11,8 @@ import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.utils.RedisIdWorker;
 import com.hmdp.utils.UserHolder;
 import com.hmdp.utils.lock.SimpleRedisLock;
+import org.redisson.api.RLock;
+import org.redisson.api.RedissonClient;
 import org.springframework.aop.framework.AopContext;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
@@ -37,6 +39,8 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     private RedisIdWorker redisIdWorker;
     @Resource
     private StringRedisTemplate stringRedisTemplate;
+    @Resource
+    private RedissonClient redissonClient;
     /**
      * 秒杀券下单
      * @param voucherId
@@ -62,9 +66,11 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 //        }
         //------------------------synchronized实现-------------------------------------
         //以order: 与userid作为锁id
-        SimpleRedisLock lock = new SimpleRedisLock(stringRedisTemplate,"order:"+UserHolder.getUser().getId());
+        //SimpleRedisLock lock = new SimpleRedisLock(stringRedisTemplate,"order:"+UserHolder.getUser().getId());
+        RLock lock = redissonClient.getLock("lock:order:"+UserHolder.getUser().getId());
         try {
-            if (!lock.tryLock(10L))
+            //if (!lock.tryLock(10L))
+            if (!lock.tryLock())
                 throw  new BizException("不允许一人多单");
             IVoucherOrderService proxy = (IVoucherOrderService) AopContext.currentProxy();
             return proxy.getOrder(voucherId, seckillVoucher);
