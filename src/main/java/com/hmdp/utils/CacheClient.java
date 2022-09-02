@@ -119,17 +119,20 @@ public class CacheClient {
     public   <R,ID> R queryByIdWithLogicExpire(  String keyPrefix,String lockPrefix, ID id, Class<R> type, Function<ID,R> dbCallback, Long time ,Long lockTime, TimeUnit timeUnit) {
         String  REGIN = keyPrefix + id;
         String  LOCK_REGIN = lockPrefix + id;
+        R r =null;
         /*1.从redis查询*/
         String cache = redisTemplate.opsForValue().get(REGIN);
-        /*2.检查过期时间,若没有过期直接返回*/
-        RedisData redisData = JSONUtil.toBean(cache, RedisData.class);
-        /*获取过期时间*/
-        LocalDateTime expireTime = redisData.getExpireTime();
-        /*获取商户数据*/
-        R r = JSONUtil.toBean((JSONObject) redisData.getData(),type);
-        LocalDateTime now = LocalDateTime.now();
-        if(now.isBefore(expireTime))/*未过期直接返回*/
-            return r;
+        if(cache!=null){
+            /*2.检查过期时间,若没有过期直接返回*/
+            RedisData redisData = JSONUtil.toBean(cache, RedisData.class);
+            /*获取过期时间*/
+            LocalDateTime expireTime = redisData.getExpireTime();
+            /*获取商户数据*/
+            r = JSONUtil.toBean((JSONObject) redisData.getData(),type);
+            LocalDateTime now = LocalDateTime.now();
+            if(now.isBefore(expireTime))/*未过期直接返回*/
+                return r;
+        }
         /*过期进行数据的重载*/
         /*3.获取锁*/
         boolean lock = getLock(LOCK_REGIN,lockTime);

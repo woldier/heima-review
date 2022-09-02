@@ -1485,9 +1485,9 @@ public class RedisIdWorker {
 
 乐观锁-版本号法
 
-![image-20220818172842151](C:\Users\wang1\IdeaProjects\hm-dianping\readme.assets\image-20220818172842151.png)
+![image-20220818172842151](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220818172842151.png)
 
-![image-20220818173327155](C:\Users\wang1\IdeaProjects\hm-dianping\readme.assets\image-20220818173327155.png)
+![image-20220818173327155](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220818173327155.png)
 
 - mybatis实现乐观锁
 
@@ -1570,4 +1570,442 @@ public class MybatisConfig {
 
 因此,我们为了增加成功率我们改用stock(库存作为判定标准)自行实现
 
-![image-20220818181148498](C:\Users\wang1\IdeaProjects\hm-dianping\readme.assets\image-20220818181148498.png)
+![image-20220818181148498](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220818181148498.png)
+
+###  10.4 一人一单
+
+![image-20220818191214350](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220818191214350.png)
+
+```java
+ @Override
+    @Transactional
+    public Long seckillVoucher(Long voucherId) throws BizException {
+        /*1.查询过期时间和库存*/
+        SeckillVoucher seckillVoucher = voucherService.getById(voucherId);
+        LocalDateTime now = LocalDateTime.now();
+        if(seckillVoucher.getBeginTime().isAfter(now)) throw new BizException("秒杀尚未开始");
+        if(seckillVoucher.getEndTime().isBefore(now)) throw new BizException("秒杀已经结束");
+        if(seckillVoucher.getStock()<1) throw new BizException("库存不足");
+        /*库存充足,实现一人一单(查询用户是否已经有某优惠券)*/
+        LambdaQueryWrapper<VoucherOrder> lambdaQueryWrapper = new LambdaQueryWrapper<>();
+        lambdaQueryWrapper.eq(VoucherOrder::getVoucherId,voucherId).eq(VoucherOrder::getUserId,UserHolder.getUser().getId());
+        int count = count(lambdaQueryWrapper);
+        /*查看是否有数据*/
+        if(count>0) throw new BizException("用户已经持有了该秒杀券");
+        /*库存扣减 自定义乐观锁*/
+        seckillVoucher.setStock(seckillVoucher.getStock()-1);
+        boolean b = voucherService.update().
+                setSql("stock = stock -1") //set stock = stock -1
+                .eq("voucher_id",voucherId).gt("stock",0) //where id =? and stock >0
+                .update(); //
+        if(!b) throw new BizException("乐观锁");
+        /*2.创建订单*/
+        VoucherOrder voucherOrder = new VoucherOrder();
+        /*得到用户id*/
+        voucherOrder.setUserId(UserHolder.getUser().getId());
+        /*生成id*/
+        Long orderId = redisIdWorker.nextId("order");
+        voucherOrder.setId(orderId);
+        /*得到代金券id*/
+        voucherOrder.setVoucherId(seckillVoucher.getVoucherId());
+        this.save(voucherOrder);
+        return orderId;
+    }
+```
+
+检查数据库看到下了10单,说明逻辑有问题.
+
+![image-20220818191309757](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220818191309757.png)
+
+
+
+解决方案,查看视频解析.
+
+https://www.bilibili.com/video/BV1cr4y1671t?p=54&vd_source=b592fd0fd3bd041bab6398e89668385d
+
+```java
+ package com.hmdp.service.impl;
+
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.hmdp.entity.SeckillVoucher;
+import com.hmdp.entity.VoucherOrder;
+import com.hmdp.exception.BizException;
+import com.hmdp.mapper.VoucherOrderMapper;
+import com.hmdp.service.ISeckillVoucherService;
+import com.hmdp.service.IVoucherOrderService;
+import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.hmdp.utils.RedisIdWorker;
+import com.hmdp.utils.UserHolder;
+import org.springframework.aop.framework.AopContext;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import javax.annotation.Resource;
+import java.time.LocalDateTime;
+
+/**
+ * <p>
+ *  服务实现类
+ * </p>
+ *
+ * @author 虎哥
+ * @since 2021-12-22
+ */
+@Service
+public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, VoucherOrder> implements IVoucherOrderService {
+
+
+    @Resource
+    private ISeckillVoucherService voucherService;
+    @Resource
+    private RedisIdWorker redisIdWorker;
+    /**
+     * 秒杀券下单
+     * @param voucherId
+     * @return
+     */
+    @Override
+
+    public Long seckillVoucher(Long voucherId) throws BizException {
+        /*1.查询过期时间和库存*/
+        SeckillVoucher seckillVoucher = voucherService.getById(voucherId);
+        LocalDateTime now = LocalDateTime.now();
+        if(seckillVoucher.getBeginTime().isAfter(now)) throw new BizException("秒杀尚未开始");
+        if(seckillVoucher.getEndTime().isBefore(now)) throw new BizException("秒杀已经结束");
+        if(seckillVoucher.getStock()<1) throw new BizException("库存不足");
+
+        synchronized (UserHolder.getUser().getId().toString().intern()){ //以userid加锁
+            // 锁加在这里而没有加载函数里是因为只有函数结束提交事务之后(因为加了@Transactional)数据库信息才会更新,而解锁是在事务提交之前,因此出现问题.
+
+        //return getOrder(voucherId, seckillVoucher);
+            //事务是基于代理的, 使用this.getOrder 代理不会生效
+            IVoucherOrderService proxy = (IVoucherOrderService) AopContext.currentProxy();
+            return proxy.getOrder(voucherId, seckillVoucher);
+        }
+    }
+
+    @Transactional
+    public Long getOrder(Long voucherId, SeckillVoucher seckillVoucher) throws BizException {
+        /*库存充足,实现一人一单(查询用户是否已经有某优惠券)*/
+        LambdaQueryWrapper<VoucherOrder> lambdaQueryWrapper = new LambdaQueryWrapper<>();
+        lambdaQueryWrapper.eq(VoucherOrder::getVoucherId, voucherId).eq(VoucherOrder::getUserId,UserHolder.getUser().getId());
+        int count = count(lambdaQueryWrapper);
+        /*查看是否有数据*/
+        if(count>0) throw new BizException("用户已经持有了该秒杀券");
+        /*库存扣减 自定义乐观锁*/
+        seckillVoucher.setStock(seckillVoucher.getStock()-1);
+        boolean b = voucherService.update().
+                setSql("stock = stock -1") //set stock = stock -1
+                .eq("voucher_id", voucherId).gt("stock",0) //where id =? and stock >0
+                .update(); //
+        if(!b) throw new BizException("乐观锁");
+        /*2.创建订单*/
+        VoucherOrder voucherOrder = new VoucherOrder();
+        /*得到用户id*/
+        voucherOrder.setUserId(UserHolder.getUser().getId());
+        /*生成id*/
+        Long orderId = redisIdWorker.nextId("order");
+        voucherOrder.setId(orderId);
+        /*得到代金券id*/
+        voucherOrder.setVoucherId(seckillVoucher.getVoucherId());
+        this.save(voucherOrder);
+        return orderId;
+    }
+}
+
+```
+
+### 10.5 分布式环境下的一人一单问题
+
+![image-20220818193600347](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220818193600347.png)
+
+![image-20220818193707081](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220818193707081.png)
+
+会发生超买,这是因为两个服务拥有各自独立的`jvm`,因此无法互斥访问.
+
+##  11. 分布式锁
+
+###  11.1分布式锁的实现
+
+![image-20220902095826294](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220902095826294.png)
+
+
+
+![image-20220902100259787](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220902100259787.png)
+
+上述实现,获取锁过程不能保证原子性,有可能在添加过期时间的过程中宕机了
+
+原子实现
+
+![image-20220902100240875](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220902100240875.png)
+
+![image-20220902100402827](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220902100402827.png)
+
+在获取锁时,我们采用`非阻塞式`:尝试一次,成功返回ture,失败返回false
+
+### 11.2 简单分布式锁业务实现
+
+![image-20220902100941731](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220902100941731.png)
+
+![image-20220902100812833](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220902100812833.png)
+
+```java
+package com.hmdp.utils.lock;
+
+/**
+ * 锁
+ */
+public interface ILock {
+    /**
+     * 获取锁
+     * @param second
+     * @return
+     */
+    boolean tryLock(Long second);
+
+    /**
+     * 释放锁
+     */
+    void unlock();
+}
+
+```
+
+```java
+package com.hmdp.utils.lock;
+
+import org.springframework.data.redis.core.StringRedisTemplate;
+
+import java.time.Duration;
+
+/**
+ * 分布式锁,redis实现
+ */
+public class LockRedisImpl implements ILock{
+    /**
+     * redis模板
+     */
+    private StringRedisTemplate redisTemplate;
+    /**
+     * 具体锁的名称
+     */
+    private String key;
+    /**
+     * 前缀
+     */
+    private final static String KEY_PREFIX = "lock:";
+
+    /**
+     * 构造函数传入参数
+     * @param redisTemplate
+     * @param key
+     */
+    public LockRedisImpl(StringRedisTemplate redisTemplate, String key) {
+        this.redisTemplate = redisTemplate;
+        this.key = key;
+    }
+
+    @Override
+    public boolean tryLock(Long second) {
+        /*设置key,并且给定过期时间*/
+        return redisTemplate.opsForValue().setIfAbsent(KEY_PREFIX + key, Thread.currentThread().getId() + "", Duration.ofSeconds(10)).booleanValue();
+    }
+
+    @Override
+    public void unlock() {
+        redisTemplate.delete(KEY_PREFIX + key);
+    }
+}
+
+```
+
+
+
+
+
+修改订单下单代码
+
+```java
+   public Long seckillVoucher(Long voucherId) throws BizException {
+        /*1.查询过期时间和库存*/
+        SeckillVoucher seckillVoucher = voucherService.getById(voucherId);
+        LocalDateTime now = LocalDateTime.now();
+        if(seckillVoucher.getBeginTime().isAfter(now)) throw new BizException("秒杀尚未开始");
+        if(seckillVoucher.getEndTime().isBefore(now)) throw new BizException("秒杀已经结束");
+        if(seckillVoucher.getStock()<1) throw new BizException("库存不足");
+        //------------------------synchronized实现-------------------------------------
+//        synchronized (UserHolder.getUser().getId().toString().intern()){ //以userid加锁
+//            // 锁加在这里而没有加载函数里是因为只有函数结束提交事务之后(因为加了@Transactional)数据库信息才会更新,而解锁是在事务提交之前,因此出现问题.
+//
+//        //return getOrder(voucherId, seckillVoucher);
+//            //事务是基于代理的, 使用this.getOrder 代理不会生效
+//            IVoucherOrderService proxy = (IVoucherOrderService) AopContext.currentProxy();
+//            return proxy.getOrder(voucherId, seckillVoucher);
+//        }
+        //------------------------synchronized实现-------------------------------------
+        //以order: 与userid作为锁id
+        SimpleRedisLock lock = new SimpleRedisLock(redisTemplate,"order:"+UserHolder.getUser().getId());
+        try {
+            if (!lock.tryLock(10L))
+                throw  new BizException("不允许一人多单");
+            IVoucherOrderService proxy = (IVoucherOrderService) AopContext.currentProxy();
+            return proxy.getOrder(voucherId, seckillVoucher);
+            //return getOrder(voucherId, seckillVoucher);
+            //事务是基于代理的, 使用this.getOrder 代理不会生效
+        } finally {
+            lock.unlock();
+        }
+
+    }
+```
+
+###  11.3 简单分布式锁业务存在的问题
+
+ ![image-20220902104654362](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220902104654362.png)
+
+原因:业务阻塞导致锁提前释放
+
+解决方法:在释放锁之前检查锁标识是否一致(即我们存入的) 
+
+```java
+    @Override
+    public void unlock() {
+        String value = ID_PREFIX + Thread.currentThread().getId() + "";
+        String s = redisTemplate.opsForValue().get(KEY_PREFIX + key);
+        if (value.equals(s))
+            redisTemplate.delete(KEY_PREFIX + key);
+    }
+```
+
+检查与释放并不是一气呵成,存在问题
+
+原子性
+
+![image-20220902121332292](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220902121332292.png)
+
+
+
+
+
+
+
+###  11.4  lua脚本
+
+
+
+![image-20220902123538039](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220902123538039.png)
+
+https://www.runoob.com/lua/lua-tutorial.html
+
+- 简单示例
+
+![image-20220902123635621](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220902123635621.png)
+
+
+
+- 脚本传参
+
+无参
+
+![image-20220902123715276](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220902123715276.png)
+
+
+
+有参
+
+![image-20220902123802780](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220902123802780.png)
+
+
+
+- 释放锁流程实现
+
+  ![image-20220902123902220](C:\Users\wang1\AppData\Roaming\Typora\typora-user-images\image-20220902123902220.png)
+
+- 调用脚本
+
+![image-20220902123013303](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220902123013303.png)
+
+不用指定numkeys,一维传入的key是List
+
+###  11.5 基于Lua项目改造
+
+在resource下新建一个unlock.lua
+
+```lua
+-- 比较线程标识与锁 钟的标识是否一致
+if(redis.call('get',KEYS[1]) == ARGV[1]) then
+    -- 释放锁 del key
+    return redis.call('del',KEYS[1])
+end
+return 0
+```
+
+
+
+
+
+```java
+/**
+ * 分布式锁,redis实现
+ */
+public class SimpleRedisLock implements ILock {
+    /**
+     * redis模板
+     */
+    private StringRedisTemplate redisTemplate;
+    /**
+     * 具体锁的名称
+     */
+    private String key;
+    /**
+     * 前缀
+     */
+    private final static String KEY_PREFIX = "lock:";
+    private final static String ID_PREFIX = UUID.randomUUID().toString(true) + "-";
+    /**
+     * lua脚本
+     */
+    private final static DefaultRedisScript<Long> unlock;
+    static {
+        unlock = new DefaultRedisScript<>();
+        //从classpath加载
+        unlock.setLocation(new ClassPathResource("unlock.lua"));
+    }
+
+    /**
+     * 构造函数传入参数
+     *
+     * @param redisTemplate
+     * @param key
+     */
+    public SimpleRedisLock(StringRedisTemplate redisTemplate, String key) {
+        this.redisTemplate = redisTemplate;
+        this.key = key;
+    }
+
+    @Override
+    public boolean tryLock(Long second) {
+        String value = ID_PREFIX + Thread.currentThread().getId() + "";
+        /*设置key,并且给定过期时间*/
+        return Boolean.TRUE.equals(redisTemplate.opsForValue().setIfAbsent(KEY_PREFIX + key, value, Duration.ofSeconds(10)));
+    }
+
+    @Override
+    public void unlock() {
+//        String value = ID_PREFIX + Thread.currentThread().getId() + "";
+//        String s = redisTemplate.opsForValue().get(KEY_PREFIX + key);
+//        if (value.equals(s))
+//            redisTemplate.delete(KEY_PREFIX + key);
+
+
+        String value = ID_PREFIX + Thread.currentThread().getId() + "";
+        redisTemplate.execute(
+                unlock, //脚本
+                Collections.singletonList(KEY_PREFIX + key), //keys
+                value //arg
+        );
+    }
+}
+
+```
+
