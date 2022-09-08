@@ -15,7 +15,7 @@ public class RedissonConfig {
     public RedissonClient redissonClient(){
         Config config = new Config();
         //config.useClusterServers();
-        config.useSingleServer().setAddress("redis:192.168.0.103");
+        config.useSingleServer().setAddress("redis://192.168.0.103:6379");
         return Redisson.create(config);
     }
 }

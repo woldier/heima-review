@@ -17,5 +17,7 @@ public interface IVoucherOrderService extends IService<VoucherOrder> {
 
     Long seckillVoucher(Long voucherId) throws BizException;
 
-    Long getOrder(Long voucherId, SeckillVoucher seckillVoucher) throws BizException;
+    //Long getOrder(Long voucherId, SeckillVoucher seckillVoucher) throws BizException;
+
+    //void getOrder2(VoucherOrder voucherOrder) throws BizException;
 }

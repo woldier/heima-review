@@ -2057,3 +2057,229 @@ public class RedissonConfig {
 
 ![image-20220902155837546](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220902155837546.png)
 
+```java
+    public Long seckillVoucher(Long voucherId) throws BizException {
+        /*1.查询过期时间和库存*/
+        SeckillVoucher seckillVoucher = voucherService.getById(voucherId);
+        LocalDateTime now = LocalDateTime.now();
+        if(seckillVoucher.getBeginTime().isAfter(now)) throw new BizException("秒杀尚未开始");
+        if(seckillVoucher.getEndTime().isBefore(now)) throw new BizException("秒杀已经结束");
+        if(seckillVoucher.getStock()<1) throw new BizException("库存不足");
+        //------------------------synchronized实现-------------------------------------
+//        synchronized (UserHolder.getUser().getId().toString().intern()){ //以userid加锁
+//            // 锁加在这里而没有加载函数里是因为只有函数结束提交事务之后(因为加了@Transactional)数据库信息才会更新,而解锁是在事务提交之前,因此出现问题.
+//
+//        //return getOrder(voucherId, seckillVoucher);
+//            //事务是基于代理的, 使用this.getOrder 代理不会生效
+//            IVoucherOrderService proxy = (IVoucherOrderService) AopContext.currentProxy();
+//            return proxy.getOrder(voucherId, seckillVoucher);
+//        }
+        //------------------------synchronized实现-------------------------------------
+        //以order: 与userid作为锁id
+        //SimpleRedisLock lock = new SimpleRedisLock(stringRedisTemplate,"order:"+UserHolder.getUser().getId());
+        RLock lock = redissonClient.getLock("lock:order:"+UserHolder.getUser().getId());
+        try {
+            //if (!lock.tryLock(10L))
+            if (!lock.tryLock())
+                throw  new BizException("不允许一人多单");
+            IVoucherOrderService proxy = (IVoucherOrderService) AopContext.currentProxy();
+            return proxy.getOrder(voucherId, seckillVoucher);
+            //return getOrder(voucherId, seckillVoucher);
+            //事务是基于代理的, 使用this.getOrder 代理不会生效
+        } finally {
+            lock.unlock();
+        }
+
+    }
+```
+
+###  12.3 可重入锁
+
+![image-20220905102007912](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220905102007912.png)
+
+![image-20220905102029364](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220905102029364.png)
+
+测试代码
+
+```java
+@SpringBootTest
+@RunWith(SpringRunner.class)
+@Slf4j
+public class RedissonTest {
+
+    @Autowired
+    RedissonClient redissonClient;
+    RLock lock;
+    @Before
+    public void setUp(){
+        lock = redissonClient.getLock("order");
+    }
+    @Test
+    public void method1(){
+        boolean b = lock.tryLock();
+        if(!b){
+            log.error("获取锁失败");
+            return;
+        }
+        try {
+            log.info("获取锁成功......................1");
+            //调用业务2
+            method2();
+            log.info("开始执行业务......................1");
+        }
+        finally {
+            log.warn("准备释放锁......................1");
+            lock.unlock();
+        }
+
+    }
+
+    public void method2(){
+        boolean b = lock.tryLock();
+        if(!b){
+            log.error("获取锁失败");
+            return;
+        }
+        try {
+            log.info("获取锁成功......................2");
+            //调用业务2
+            log.info("开始执行业务......................2");
+        }
+        finally {
+            log.warn("准备释放锁......................2");
+            lock.unlock();
+        }
+    }
+}
+```
+
+method1获取到锁后查看redis
+
+![image-20220905103830341](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220905103830341.png)
+
+method2获取锁 后查看redis
+
+![image-20220905104008317](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220905104008317.png)
+
+源码:
+
+![image-20220905114617098](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220905114617098.png)
+
+视频讲解:
+
+redisson分布式锁实现原理
+
+https://www.bilibili.com/video/BV1cr4y1671t?p=67&spm_id_from=pageDriver&vd_source=b592fd0fd3bd041bab6398e89668385d
+
+### 12.4 主从一致
+
+![image-20220905121838218](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220905121838218.png)
+
+redisson multLock
+
+redisson主从一致性问题实现原理
+
+https://www.bilibili.com/video/BV1cr4y1671t?p=68&vd_source=b592fd0fd3bd041bab6398e89668385d
+
+![image-20220905122330540](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220905122330540.png)
+
+##  13. 秒杀优化
+
+### 13.1 异步秒杀思路
+
+
+
+![image-20220908082952171](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220908082952171.png)
+
+redis钟涉及到两个保存的信息,分别是库存信息和购买优惠券的优惠信息.
+
+![image-20220908083439218](https://woldier-pic-repo-1309997478.cos.ap-chengdu.myqcloud.com/image-20220908083439218.png)
+
+###  13.2 基于redis的异步秒杀
+
+1. 更改新增秒杀券的逻辑,增到写入到redis
+
+```java
+ @Override
+    @Transactional
+    public void addSeckillVoucher(Voucher voucher) {
+        // 保存优惠券
+        save(voucher);
+        // 保存秒杀信息
+        SeckillVoucher seckillVoucher = new SeckillVoucher();
+        seckillVoucher.setVoucherId(voucher.getId());
+        seckillVoucher.setStock(voucher.getStock());
+        seckillVoucher.setBeginTime(voucher.getBeginTime());
+        seckillVoucher.setEndTime(voucher.getEndTime());
+        seckillVoucherService.save(seckillVoucher);
+        //缓存新增的优惠券信息到redis
+        redisTemplate.opsForValue().set("seckill:stock:"+voucher.getId(),voucher.getStock().toString());
+    }
+```
+
+2. 判断秒杀下单的lua脚本
+
+```lua
+--1.参数列表
+--1.1 优惠券id
+local voucherId = ARGV[1]
+--1.2 用户id
+local userId = ARGV[2]
+
+--2.数据key
+--2.1库存key (字符串拼接)
+local stockKey = 'seckill:stock:' .. voucherId
+--2.2订单key
+local orderKey = 'seckill:order:' .. voucherId
+
+--3.脚本业务
+--3.1若库存不足返回1
+if( tonumber(redis.call('get',stockKey)) <= 0 ) then
+    return 1
+end
+--3.2判断用户是否为重复下单
+if(redis.call('sismember',orderKey,userId) == 1) then
+    return 2
+end
+
+--3.3口库存
+redis.call('incrby',stockKey,-1)
+--3.4加订单
+redis.call('add',orderKey,userId)
+return 0 
+```
+
+
+
+3. 下单业务
+
+```java
+/**
+     * 秒杀券下单 基于lua脚本
+     *
+     * @param voucherId
+     * @return
+     */
+    @Override
+    @Transactional
+    public Long seckillVoucher(Long voucherId) throws BizException {
+        //1.执行lua脚本
+        Long execute = stringRedisTemplate.execute(
+                SECKILL_SCRIPT,
+                Collections.EMPTY_LIST //key参数没有不能传null
+                , voucherId.toString(), UserHolder.getUser().getId().toString());
+        int res = execute.intValue();
+        // 2.判断结构是否位0(不为0返回异常信息)
+        if(res !=0 )
+            if (res == 1) throw new BizException("库存不足");
+            if (res == 2) throw new BizException("重复下单");
+        //3.将优惠券id,用户id,订单id加入到阻塞队列中
+        /*3.1生成id*/
+        Long orderId = redisIdWorker.nextId("order");
+        //返回订单id
+        return orderId;
+    }
+```
+
+
+
